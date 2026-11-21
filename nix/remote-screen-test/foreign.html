@@ -17,7 +17,7 @@ const URL = 'ws://127.0.0.1:5900/';
 
 async function raw() {
   const out = { opened: false, received: [], closed: null, error: null };
-  const ws = new WebSocket(URL, ['binary']);
+  const ws = new WebSocket(URL);  // no subprotocol: wayvnc 0.8 drops a handshake that asks for one
   ws.binaryType = 'arraybuffer';
   let step = 0;
   ws.onopen = () => { out.opened = true; };
