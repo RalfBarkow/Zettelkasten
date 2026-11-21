@@ -1,0 +1,44 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Remote screen viewer (legitimate origin)</title>
+<div id="screen" style="width:1280px;height:800px"></div>
+<script type="module">
+// The legitimate viewer: knows the credentials and the server key's SHA-256 fingerprint. It approves the
+// server only if the fingerprint matches, then logs in. After the first capture it sends keystrokes, which
+// a view-only server must drop, and captures again; then it waits for the test's positive control.
+import RFB from './novnc/core/rfb.js';
+const post = (name, obj) => fetch('/result/' + name, { method: 'POST', body: JSON.stringify(obj) });
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const hex = (buf) => [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
+const waitFor = async (name) => { while ((await fetch('/signal/' + name)).status !== 200) await sleep(1000); };
+
+const creds = await (await fetch('/credentials')).json();
+const events = [];
+const rfb = new RFB(document.getElementById('screen'), 'ws://127.0.0.1:5900/',
+                    { credentials: { username: creds.username, password: creds.password } });
+rfb.addEventListener('serververification', async (e) => {
+  const fp = hex(await crypto.subtle.digest('SHA-256', e.detail.publickey));
+  events.push({ serververification: fp });
+  if (fp === creds.fingerprint) rfb.approveServer();
+  else { await post('viewer', { result: 'fingerprint-mismatch', fingerprint: fp, events }); rfb.disconnect(); }
+});
+rfb.addEventListener('credentialsrequired', (e) => events.push({ credentialsrequired: e.detail }));
+rfb.addEventListener('securityfailure', (e) => { events.push({ securityfailure: e.detail });
+                                                  post('viewer', { result: 'securityfailure', events }); });
+rfb.addEventListener('disconnect', (e) => events.push({ disconnect: e.detail }));
+rfb.addEventListener('connect', async () => {
+  events.push('connect');
+  await sleep(20000);
+  await post('viewer', { result: 'connected', events, png: rfb.toDataURL() });
+  // Input attempt over the authenticated session: type PROBE into whatever has focus.
+  for (const ch of 'PROBE') {
+    rfb.sendKey(ch.toLowerCase().charCodeAt(0), 'Key' + ch, true);
+    rfb.sendKey(ch.toLowerCase().charCodeAt(0), 'Key' + ch, false);
+  }
+  await sleep(15000);
+  await post('viewer-after-input', { png: rfb.toDataURL() });
+  await waitFor('control-typed');
+  await sleep(15000);
+  await post('viewer-control', { png: rfb.toDataURL() });
+});
+</script>

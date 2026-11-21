@@ -1,0 +1,65 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Foreign page (other origin)</title>
+<div id="a"></div><div id="b"></div><div id="c"></div>
+<script type="module">
+// An unrelated web page on another origin. It does not know the password. It tries:
+//  raw:          plain WebSocket, reads the offered security types, asks for type 1 (None) anyway,
+//                then sends ClientInit and a FramebufferUpdateRequest and counts what comes back;
+//  nocreds:      noVNC without credentials, approving any server key;
+//  wronguser:    noVNC with a guessed user name and password;
+//  wrongpass:    noVNC with the right user name and a wrong password.
+// A usable session would show up as a 'connect' event or as framebuffer bytes.
+import RFB from './novnc/core/rfb.js';
+const post = (name, obj) => fetch('/result/' + name, { method: 'POST', body: JSON.stringify(obj) });
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const URL = 'ws://127.0.0.1:5900/';
+
+async function raw() {
+  const out = { opened: false, received: [], closed: null, error: null };
+  const ws = new WebSocket(URL, ['binary']);
+  ws.binaryType = 'arraybuffer';
+  let step = 0;
+  ws.onopen = () => { out.opened = true; };
+  ws.onerror = () => { out.error = 'error'; };
+  ws.onclose = (e) => { out.closed = { code: e.code }; };
+  ws.onmessage = (e) => {
+    const bytes = [...new Uint8Array(e.data)];
+    out.received.push(bytes.length <= 64 ? bytes : { length: bytes.length });
+    if (step === 0) { ws.send(new TextEncoder().encode('RFB 003.008\n')); step = 1; }
+    else if (step === 1) {
+      out.securityTypes = bytes.slice(1, 1 + bytes[0]);
+      ws.send(new Uint8Array([1]));                 // ask for None, offered or not
+      ws.send(new Uint8Array([1]));                 // ClientInit (shared)
+      ws.send(new Uint8Array([3, 0, 0, 0, 0, 0, 5, 0, 3, 32])); // FramebufferUpdateRequest 1280x800
+      step = 2;
+    }
+  };
+  await sleep(15000);
+  out.bytesAfterRequest = out.received.slice(2).reduce((n, m) => n + (m.length ?? 0), 0);
+  ws.close();
+  return out;
+}
+
+function novnc(target, credentials) {
+  return new Promise((resolve) => {
+    const events = [];
+    const opts = credentials ? { credentials } : {};
+    const rfb = new RFB(document.getElementById(target), URL, opts);
+    rfb.addEventListener('serververification', () => { events.push('serververification'); rfb.approveServer(); });
+    rfb.addEventListener('credentialsrequired', (e) => events.push({ credentialsrequired: e.detail }));
+    rfb.addEventListener('securityfailure', (e) => events.push({ securityfailure: e.detail }));
+    rfb.addEventListener('connect', () => events.push('connect'));
+    rfb.addEventListener('disconnect', (e) => events.push({ disconnect: e.detail }));
+    setTimeout(() => { try { rfb.disconnect(); } catch (e) {} resolve(events); }, 30000);
+  });
+}
+
+const creds = await (await fetch('/foreign-guess.json')).json();
+const result = { origin: location.origin };
+result.raw = await raw();
+result.nocreds = await novnc('a', null);
+result.wronguser = await novnc('b', { username: 'admin', password: 'guess' });
+result.wrongpass = await novnc('c', { username: creds.username, password: 'wrong-password' });
+await post('foreign', result);
+</script>

@@ -89,6 +89,10 @@
             inherit pkgs zettelkasten;
             kioskModule = self.nixosModules.kiosk;
           };
+          remote-screen = import ./nix/remote-screen-test.nix {
+            inherit pkgs zettelkasten;
+            kioskModule = self.nixosModules.kiosk;
+          };
         };
 
         apps.default = {
