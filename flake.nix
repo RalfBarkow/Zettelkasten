@@ -1,5 +1,5 @@
 {
-  description = "Zettelkasten (Swing) dev shell with JDK 25 + Maven + IntelliJ IDEA CE + repomix-md";
+  description = "Zettelkasten (Swing) dev shell with JDK 25 + Maven + IntelliJ IDEA CE";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-24.05";
@@ -45,20 +45,6 @@
 
         maven = pkgs.maven.override { inherit jdk; };
 
-        # --- repomix: disable failing test suite (macOS / sysctl issue) ---
-        repomix =
-          (pkgsUnstable.repomix or (throw "repomix not found in nixpkgs-unstable"))
-            .overrideAttrs (_: {
-              doCheck = false;
-            });
-
-        # --- repomix-md wrapper ---
-        repomixMd = pkgs.writeShellScriptBin "repomix-md" ''
-          set -euo pipefail
-          OUT="''${REPOMIX_MD_OUT:-zettelkasten-repomix-output.md}"
-          exec ${repomix}/bin/repomix --style markdown -o "$OUT" "$@"
-        '';
-
         # --- macOS IntelliJ launcher ---
         ideaMacWrapper = pkgs.writeShellScriptBin "idea-community" ''
           set -euo pipefail
@@ -79,7 +65,7 @@
         packages.temurin = jdk;
         devShells.default = pkgs.mkShell {
           packages =
-            [ jdk maven repomixMd ]
+            [ jdk maven ]
             ++ (if pkgs.stdenv.isLinux
                 then [ pkgs.jetbrains.idea-community ]
                 else [ ideaMacWrapper ]);
@@ -91,7 +77,6 @@
             echo "▶ Zettelkasten dev shell"
             echo "   Java:    $(java -version 2>&1 | head -n1)"
             echo "   Maven:  $(mvn -v | head -n1)"
-            echo "   Repomix: repomix-md → zettelkasten-repomix-output.md"
             echo
             echo "IDEA:  idea-community ."
           '';
@@ -103,11 +88,6 @@
             if pkgs.stdenv.isLinux
             then "${pkgs.jetbrains.idea-community}/bin/idea-community"
             else "${ideaMacWrapper}/bin/idea-community";
-        };
-
-        apps.repomix-md = {
-          type = "app";
-          program = "${repomixMd}/bin/repomix-md";
         };
       }
     );
