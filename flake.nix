@@ -75,8 +75,26 @@
           echo "IntelliJ IDEA CE app not found."
           exit 1
         '';
+        zettelkasten = pkgs.callPackage ./nix/package.nix {
+          inherit maven jdk;
+          rev = self.rev or self.dirtyRev or "unknown";
+        };
       in {
         packages.temurin = jdk;
+        packages.zettelkasten = zettelkasten;
+        packages.default = zettelkasten;
+
+        checks = pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+          kiosk = import ./nix/kiosk-test.nix {
+            inherit pkgs zettelkasten;
+            kioskModule = self.nixosModules.kiosk;
+          };
+        };
+
+        apps.default = {
+          type = "app";
+          program = "${zettelkasten}/bin/zettelkasten";
+        };
         devShells.default = pkgs.mkShell {
           packages =
             [ jdk maven repomixMd ]
@@ -110,5 +128,12 @@
           program = "${repomixMd}/bin/repomix-md";
         };
       }
-    );
+    ) // {
+      # A computer that shows only Zettelkasten (cage kiosk); package defaults to this flake's build.
+      nixosModules.kiosk = { pkgs, lib, ... }: {
+        imports = [ ./nix/kiosk.nix ];
+        services.zettelkasten-kiosk.package =
+          lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.zettelkasten;
+      };
+    };
 }
