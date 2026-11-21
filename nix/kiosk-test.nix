@@ -16,13 +16,11 @@ pkgs.testers.runNixOSTest {
 
   enableOCR = true;
 
-  testScript = { nodes, ... }:
-    let uid = toString nodes.machine.users.users.zettelkasten.uid;
-    in ''
+  testScript = ''
       start_all()
-      with subtest("the kiosk starts Zettelkasten"):
-          machine.wait_for_file("/run/user/${uid}/wayland-0.lock")
-          machine.wait_until_succeeds("pgrep -f Zettelkasten.jar", timeout=600)
+      with subtest("the kiosk starts Zettelkasten as its unprivileged user"):
+          machine.wait_for_unit("cage-tty1.service")
+          machine.wait_until_succeeds("pgrep -u zettelkasten -f Zettelkasten.jar", timeout=900)
       with subtest("its window is on the screen"):
           machine.wait_for_text("Zettelkasten", timeout=1200)
           machine.screenshot("zettelkasten-kiosk")
