@@ -62,9 +62,6 @@ pkgs.testers.runNixOSTest {
         machine.succeed("systemctl restart cage-tty1.service")
         machine.wait_until_succeeds("pgrep -u zettelkasten -f Zettelkasten.jar", timeout=900)
 
-    def journal_since_restart():
-        return machine.succeed("journalctl -u cage-tty1.service -b --no-pager -o cat")
-
     def ocr(json_name, png_name):
         machine.succeed(f"python3 ${decode} {results}/{json_name}.json /tmp/{png_name}.png")
         machine.copy_from_vm(f"/tmp/{png_name}.png", "")
@@ -81,7 +78,7 @@ pkgs.testers.runNixOSTest {
         machine.wait_until_succeeds("pgrep -u zettelkasten -f Zettelkasten.jar", timeout=900)
 
     with subtest("without credentials the remote screen is refused and nothing listens on 5900"):
-        machine.wait_until_succeeds("journalctl -u cage-tty1.service -b -o cat | grep -q 'remote screen refused: .*/username is missing'")
+        machine.wait_until_succeeds("journalctl -b -o cat | grep -q 'remote screen refused: .*/username is missing'")
         machine.fail("ss -tlnH | grep -q ':5900 '")
 
     with subtest("credentials readable by others are refused"):
@@ -95,7 +92,7 @@ pkgs.testers.runNixOSTest {
             f"chmod 0644 {secrets}/password",
         )
         restart_kiosk()
-        machine.wait_until_succeeds("journalctl -u cage-tty1.service -b -o cat | grep -q 'password is readable by others'")
+        machine.wait_until_succeeds("journalctl -b -o cat | grep -q 'password is readable by others'")
         machine.fail("ss -tlnH | grep -q ':5900 '")
 
     with subtest("with credentials provisioned, wayvnc listens on loopback only and the password is on no command line"):
