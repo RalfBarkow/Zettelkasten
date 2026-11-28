@@ -1,0 +1,263 @@
+# Builds every release artifact from ONE commit and creates a GitHub release.
+#
+# Manual only (Actions → Release → Run workflow). By default the result is a
+# DRAFT PRE-RELEASE: nothing is public, no tag exists, and the current
+# "Latest" release stays as it is until a maintainer reviews the assets and
+# presses "Publish release". Publishing creates the tag at the built commit.
+
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch, tag or commit SHA to build
+        required: true
+        default: main
+      tag:
+        description: Release tag, "v" + <version> from pom.xml (e.g. v3.2026.11)
+        required: true
+      previous_tag:
+        description: Previous release tag (start of the generated changelog)
+        required: true
+        default: v3.2022.8
+      prerelease:
+        description: Mark as pre-release (does not replace "Latest")
+        type: boolean
+        default: true
+      draft:
+        description: Create as draft (publish manually after checking the assets)
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  # README: rebuild releases with the same JDK distribution and patch version.
+  JAVA_DISTRIBUTION: temurin
+  JAVA_VERSION: '25.0.5'
+
+jobs:
+  prepare:
+    name: Validate inputs
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0   # full history + tags for the checks below
+
+      - id: resolve
+        env:
+          TAG: ${{ inputs.tag }}
+          PREVIOUS_TAG: ${{ inputs.previous_tag }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]{4}\.[0-9]+$ ]]; then
+            echo "::error::Tag '$TAG' does not look like v3.YYYY.N"; exit 1
+          fi
+
+          version=$(python3 -I -c 'import xml.etree.ElementTree as ET; print(ET.parse("pom.xml").getroot().find("{http://maven.apache.org/POM/4.0.0}version").text.strip())')
+          if [[ "$version" == *SNAPSHOT* ]]; then
+            echo "::error::pom.xml version $version is a SNAPSHOT"; exit 1
+          fi
+          if [[ "v$version" != "$TAG" ]]; then
+            echo "::error::Tag $TAG does not match pom.xml version $version (expected v$version)"; exit 1
+          fi
+
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null; then
+            echo "::error::Tag $TAG already exists"; exit 1
+          fi
+          if ! git rev-parse -q --verify "refs/tags/$PREVIOUS_TAG" >/dev/null; then
+            echo "::error::Previous tag $PREVIOUS_TAG not found"; exit 1
+          fi
+          if ! git merge-base --is-ancestor "$PREVIOUS_TAG" HEAD; then
+            echo "::error::$PREVIOUS_TAG is not an ancestor of $(git rev-parse --short HEAD)"; exit 1
+          fi
+
+          sha=$(git rev-parse HEAD)
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Releasing $TAG (version $version) from $sha" >> "$GITHUB_STEP_SUMMARY"
+
+  build-jar:
+    name: Test + JAR (Linux)
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+      - uses: actions/setup-java@v5
+        with:
+          distribution: ${{ env.JAVA_DISTRIBUTION }}
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: maven
+      # Full test suite once, under a virtual display so Swing tests are not skipped.
+      - name: Build and test
+        run: |
+          command -v xvfb-run >/dev/null || { sudo apt-get update && sudo apt-get install -y xvfb; }
+          xvfb-run -a mvn -B clean verify
+      - name: Stage
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          mkdir dist
+          cp target/Zettelkasten.jar "dist/Zettelkasten-$VERSION.jar"
+          unzip -p "dist/Zettelkasten-$VERSION.jar" META-INF/MANIFEST.MF | grep -q '^Main-Class:'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-jar
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  build-windows:
+    name: EXE (Windows)
+    needs: prepare
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+      - uses: actions/setup-java@v5
+        with:
+          distribution: ${{ env.JAVA_DISTRIBUTION }}
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: maven
+      - name: Package (Launch4j via windows profile)
+        run: mvn -B -DskipTests clean package
+      - name: Stage
+        shell: bash
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          mkdir dist
+          cp target/Zettelkasten.exe "dist/Zettelkasten-$VERSION.exe"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-windows
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  build-macos:
+    name: App bundle (macOS ${{ matrix.arch }})
+    needs: prepare
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          # Each bundle embeds one JDK, so build once per architecture (README).
+          - runner: macos-15
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+      - uses: actions/setup-java@v5
+        with:
+          distribution: ${{ env.JAVA_DISTRIBUTION }}
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: maven
+      - name: Package app bundle with embedded JDK
+        run: mvn -B -Pmac -DskipTests -Dmacosappbundler.dmg.enabled=false clean package
+      - name: Verify embedded Java
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = "$ARCH"
+          app=target/Zettelkasten.app/Contents
+          jdk="$app/Java/jdk"
+          test -x "$jdk/lib/jspawnhelper"
+          lipo "$app/MacOS/JavaLauncher" -verify_arch "$ARCH"
+          lipo "$jdk/lib/libjli.dylib" -verify_arch "$ARCH"
+          "$jdk/bin/java" -XshowSettings:properties -version 2>&1 |
+            grep -E '^[[:space:]]*java.specification.version = 25$'
+      - name: Stage
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          mkdir dist
+          ditto -c -k --sequesterRsrc --keepParent target/Zettelkasten.app \
+            "dist/Zettelkasten-$VERSION-macOS-$ARCH.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-macos-${{ matrix.arch }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Create GitHub release
+    needs: [prepare, build-jar, build-windows, build-macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum -- * > SHA256SUMS.txt && cat SHA256SUMS.txt
+
+      - name: Release notes header
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          SHA: ${{ needs.prepare.outputs.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          cat > notes.md <<EOF
+          > **Java 25 required.** Version 3.2022.8 ran on Java 8. The macOS app bundles its own Java; the JAR and the Windows EXE need Java 25 or newer installed (e.g. [Eclipse Temurin](https://adoptium.net/)).
+          >
+          > Back up your \`.zkn3\` file before upgrading.
+
+          | File | For | Java |
+          |---|---|---|
+          | \`Zettelkasten-$VERSION-macOS-arm64.zip\` | Mac with Apple Silicon | bundled |
+          | \`Zettelkasten-$VERSION-macOS-x86_64.zip\` | Mac with Intel CPU | bundled |
+          | \`Zettelkasten-$VERSION.exe\` | Windows, 64-bit | Java 25+ via \`JAVA_HOME\` / \`PATH\` |
+          | \`Zettelkasten-$VERSION.jar\` | any OS: \`java -jar Zettelkasten-$VERSION.jar\` | Java 25+ |
+
+          The macOS app and the Windows EXE are **not signed or notarized**. On macOS, open the app the first time via right-click → Open. Verify downloads with \`SHA256SUMS.txt\`.
+
+          Built from \`$SHA\` by [this workflow run]($RUN_URL).
+
+          EOF
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ inputs.tag }}
+          PREVIOUS_TAG: ${{ inputs.previous_tag }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          SHA: ${{ needs.prepare.outputs.sha }}
+          DRAFT: ${{ inputs.draft }}
+          PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          set -euo pipefail
+          args=(--target "$SHA" --title "Zettelkasten $VERSION"
+                --notes-file notes.md --generate-notes --notes-start-tag "$PREVIOUS_TAG")
+          if [[ "$DRAFT" == "true" ]]; then args+=(--draft); fi
+          if [[ "$PRERELEASE" == "true" ]]; then args+=(--prerelease --latest=false); fi
+          url=$(gh release create "$TAG" dist/* "${args[@]}")
+          echo "Release: $url (draft=$DRAFT, prerelease=$PRERELEASE)" >> "$GITHUB_STEP_SUMMARY"
